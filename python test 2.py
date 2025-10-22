@@ -1,14 +1,14 @@
 import requests
 import pandas as pd
-from atproto import Client
-import json
+#from atproto import Client
+#import json
 from langdetect import detect, detect_langs
 from langdetect.lang_detect_exception import LangDetectException
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from  roberta_sentiment import roberta_sentiment
 import csv
 
-data = pd.read_json(r"C:\Users\milov\Downloads\test\2025-09-08.json", lines=True, nrows=10000)
+data = pd.read_json(r"2025-09-08_posts.json", lines=True, nrows=100)
 
 uri_batches = []
 uris = []
@@ -26,7 +26,6 @@ for index, row in data.iterrows():
 
 print(len(uri_batches[0]))
 
-# The endpoint
 url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
 
 repostedCount = 0
@@ -76,22 +75,6 @@ with open('sentiment_results.csv', 'w', encoding="utf-8", newline='') as outputF
                         notEnglishCount += 1
                 else:
                     noTextCount += 1
-            
-            '''
-            returned_uris = {post["uri"] for post in posts}
-            missing_uris = [uri for uri in uri_batches[0] if uri not in returned_uris] 
-            for uri in missing_uris:
-                response = requests.get(url, params={"uri": missing_uris})
-                if response.status_code == 404:
-                    print(f"{uri} -> Not found (deleted or incorrect)")
-                elif response.status_code == 403:
-                    print(f"{uri} -> Access forbidden (private/blocked)")
-                elif response.status_code == 200:
-                    print(f"{uri} -> Post exists but was missing from bulk response")
-                else:
-                    print(f"{uri} -> Unexpected status {response.status_code}")    
-            '''
-
         else:
             print(f"Error {response.status_code}: {response.text}")
 
