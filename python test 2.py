@@ -18,13 +18,9 @@ for index, row in data.iterrows():
         #print(row)
         #print(str(index) + ' : ' + row['uri'] + ' : ' + row['text'] + '\n')
         uris.append(row['uri'])
-    if len(uris) == 25:
+    if len(uris) == 25: # 1 request can only contain 25 uris
         uri_batches.append(uris)
         uris = []
-
-#print(uri_batches)
-
-print(len(uri_batches[0]))
 
 url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
 
@@ -32,49 +28,50 @@ repostedCount = 0
 unrepostedCount = 0
 noTextCount = 0
 notEnglishCount = 0
-failedText = [[]] # store text on which the language detector fails
+failedText = [[]]   # store text on which the language detector fails. 
+                    # these are rare cases in which there is text, but the text fails the language detector
 
-analyzer = SentimentIntensityAnalyzer()
+analyzer = SentimentIntensityAnalyzer() # Vader sentiment analyser
 
 with open('sentiment_results.csv', 'w', encoding="utf-8", newline='') as outputFile:
 
-    writer = csv.writer(outputFile, quoting=csv.QUOTE_ALL)
+    writer = csv.writer(outputFile)
 
     for uris in uri_batches :
 
-        # Make the GET request with query parameters
         response = requests.get(url, params={"uris": uris})
 
-        # Check if it worked
         if response.status_code == 200:
-            data = response.json()  # Parse the JSON response
+            data = response.json()
             posts = data.get("posts", [])
 
-            print(len(posts))
-            
-            # Print each post’s basic info
             for post in posts:
                 author = post["author"]["handle"]
                 text = post["record"].get("text", "")
                 reposts = post["repostCount"]
-                if any(map(str.isalpha, text)): #check if there is text in post   
-                    try:
-                        if(detect(text) == 'en'): # detect language
-                            sentiment_2 = roberta_sentiment(text)
-                            sentiment = analyzer.polarity_scores(text).get('compound')
-                            #print(f"{author}: \n{text} ({reposts}) \nsentiment: {sentiment.get('compound')}\n")
-                            print(f"{text}\n Vader sentiment : {sentiment} , Roberta sentiment : {sentiment_2}")
-                            writer.writerow([text,sentiment,sentiment_2])
-                            if (reposts > 0) : 
-                                repostedCount += 1
-                            else : 
-                                unrepostedCount += 1
-                    except LangDetectException as e:
-                        failedText.append(text)
-                    else:
+
+                try:
+                    if not any(map(str.isalpha, text)): #check if there is text in post
+                        noTextCount += 1
+                    elif (detect(text) != 'en'): # detect language (should probably be changed to use a different tool)
                         notEnglishCount += 1
-                else:
-                    noTextCount += 1
+
+                    else:
+                        sentiment_2 = roberta_sentiment(text) # Roberta sentiment is AI and works better for text requiring some context knowledge
+                        sentiment = analyzer.polarity_scores(text).get('compound') # Vader sentiment is simple and not really good
+                        #print(f"{author}: \n{text} ({reposts}) \nsentiment: {sentiment.get('compound')}\n")
+                        print(f"{text}\n Vader sentiment : {sentiment} , Roberta sentiment : {sentiment_2}")
+                        writer.writerow([text.replace('\n', '\\n'),sentiment,sentiment_2]) 
+
+                        if (reposts > 0) : 
+                            repostedCount += 1
+                        else : 
+                            unrepostedCount += 1
+
+                except LangDetectException as e: # Sometimes a text containing unusual letters fails the language detection library
+                    failedText.append(text) 
+                    
+                    
         else:
             print(f"Error {response.status_code}: {response.text}")
 
