@@ -8,9 +8,13 @@ from atproto_core import cbor
 from datetime import datetime, timezone
 import numpy
 import dag_cbor
+import python_test_2
 
 
 uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
+url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
+
+
 
 async def main():
     client = AsyncFirehoseSubscribeReposClient()
@@ -19,7 +23,7 @@ async def main():
     called = 0
     times = []
     posts_to_store = set()
-    isMatch = False
+    isMatch = 0
 
 
     async def handle_post(op):
@@ -29,29 +33,28 @@ async def main():
             #print(action)
             i = 0
         else:
-            if len(posts_to_store) > 50000:
+            if len(posts_to_store) > 500:
                 return
             elif len(posts_to_store) % 1000 == 0:
                 print(f'length: {len(posts_to_store)}')
-            raw_post_cid = op.get('cid')
-            post_cid = CID.decode(raw_post_cid)
-            print(CID.decode(raw_post_cid))
-            print(op)
-            await client.stop()
+            post_uri = op.get('path').split(r'/')[1]   
             #print(f'post: {raw_post_cid}')
             #print(op)
             if True:
-                posts_to_store.add(raw_post_cid)
+                posts_to_store.add(post_uri)
+                #print(f'added {post_uri}')
 
 
-    async def handle_repost(op):
+    async def handle_repost(op, carFile):
         nonlocal isMatch
         nonlocal posts_to_store
+
+
         
-        action = op.get("action","")
-        raw_post_cid = op.get('cid')
-        print(CID.decode(raw_post_cid))
-        print(op)
+        action = op.get("action","")      
+
+        
+
         #await client.stop()
         #print(raw_post_cid)
         #post_cid = CID.decode(raw_post_cid)
@@ -59,10 +62,24 @@ async def main():
         if action != "create":
             i = 0
             #print(op)
-        elif raw_post_cid in posts_to_store:
-          print('match!')
-          isMatch = True
-          print(raw_post_cid)
+        else: 
+            raw_post_cid = op.get('cid')
+            post_cid = CID.decode(raw_post_cid)
+            for key in carFile.blocks.keys():
+                if key == post_cid:
+                    repostedUriFull = carFile.blocks[key].get('subject').get('uri')
+                    repostedUri = repostedUriFull.split('/')[-1]
+                    
+                    break
+            
+          
+            if repostedUri in posts_to_store:
+                print('match!')
+                isMatch += 1
+                print(repostedUri)
+                python_test_2.getPosts([repostedUriFull])
+            #print(f'checked {repostedUri}')
+            
             
 
             
@@ -78,19 +95,28 @@ async def main():
         called += 1
 
         ops = event.body.get("ops", [])
+        #print(event)
+        #print (event.body.get('blocks'))
         
         for op in ops:
-            type = op.get("path", "")
-            if type.startswith("app.bsky.feed.repost") :
+            opType = op.get("path", "")
+            if opType.startswith("app.bsky.feed.repost") :
+                
+                carFile = CAR.from_bytes(event.body['blocks'])
+                #print(await dag_cbor.decode(event.body['blocks']))
+                #print(list(carFile.blocks.keys()))
+                #print(cbor.decode_dag_multi(event.body['blocks']))
+                
                 #print(f'cid: {post_cid}')
                 #print('called')
-                await handle_repost(op)
+                await handle_repost(op, carFile)
+                break
                 #print(event)
                 #print(await dag_cbor.decode(event.body['blocks']))
                 #await client.stop()
-                break
                 reader = CAR.from_bytes(event.body["blocks"])
                 blocks = reader.blocks#.get(op.get('cid'))
+                
                 for block in blocks.values():
                   #print(f'blockie: {block} \n')
                   for e in block.get('e', []):
@@ -113,7 +139,7 @@ async def main():
 
                 await client.stop()
               
-            elif type.startswith("app.bsky.feed.post") :
+            elif opType.startswith("app.bsky.feed.post") :
                 await handle_post(op)
                 
             else: 
@@ -129,9 +155,9 @@ async def main():
             times.append(taken_time.total_seconds())
             processed += 1
     
-    async def isMatch():
+    async def Match():
         nonlocal isMatch
-        while isMatch != True:
+        while isMatch < 50:
             await asyncio.sleep(5)
         print(isMatch)
         return
@@ -139,79 +165,18 @@ async def main():
 
     client.on_repo_commit = listen_to_websocket
     task = asyncio.create_task(client.start(listen_to_websocket))
-    #await asyncio.sleep(100)
-    await isMatch()
+    #await asyncio.sleep(1)
+    await Match()
     await client.stop()
     
     await task
-    print(f"first: {times[0]}, last: {times[len(times)-1]}, average: {numpy.average(times)}")
-    print(f"called: {called}, processed: {processed}, useless: {useless}")
+    if len(times)>0:
+      print(f"first: {times[0]}, last: {times[len(times)-1]}, average: {numpy.average(times)}")
+      print(f"called: {called}, processed: {processed}, useless: {useless}")
+      print(times[::500])
     #print(posts_to_store)
 
 asyncio.run(main())
-
-
-
-'''
-def is_suitable_post(message):
-    if "commit" not in message or "record" not in message["commit"] or message["commit"]["record"]["$type"] != "app.bsky.feed.post":
-      print('not a post')
-      return False
-    else:
-       record = message["commit"]["record"]
-
-
-    if "langs" not in record: # remove
-      print('not eng')
-      return False
-    elif "reply" in record: # Check if post is a reply to another post. We want to filter those out
-      print('reply')
-      return False
-    #elif "facets" in message["commit"]["record"] and List(filter(lambda f: f['$type'] == message["commit"]["record"]["facets"]:
-    #  print(json.dumps(message["commit"]["record"]["facets"], indent = 2))
-    else:
-      langs = record["langs"]
-      if len(langs) == 1 and langs[0] == 'en': 
-          try:
-              record["text"].encode(encoding='utf-8').decode('ascii')
-          except UnicodeDecodeError:
-              #print("not english: " + message["commit"]["record"]["text"])
-              return False
-          else: 
-              #print("english: " + message["commit"]["record"]["text"])
-              return True
-               
-def show_fields(message):
-   fields = {}
-   print(type(message))
-   if isinstance(message, dict):
-      print('t')
-  '''    
-
-'''
-async def listen_to_websocket():
-  async with websockets.connect(uri) as websocket:
-    for i in range(101):
-      try:
-        response = await websocket.recv()
-        message = json.loads(response)
-        if message['$type'] == 'app.bsky.feed.post':
-          print(json.dumps(message, indent=2))
-        #print(message["commit"]["record"]["$type"])
-        
-            #print(json.dumps(message["commit"]["record"]["text"], indent=2))
-        if is_suitable_post(message):
-           print('s')
-        show_fields(message)
-           #print(json.dumps(message, indent=2))
-      except websockets.ConnectionClosed as e:
-        print(f"Connection closed: {e}")
-        break
-      except Exception as e:
-        print(f"Error: {e}")
-        print(json.dumps(message))
-'''
-
 
 
 
