@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 #from atproto import Client
-#import json
+import json
 from langdetect import detect, detect_langs
 from langdetect.lang_detect_exception import LangDetectException
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -21,6 +21,8 @@ for index, row in data.iterrows():
     if len(uris) == 25: # 1 request can only contain 25 uris
         uri_batches.append(uris)
         uris = []
+
+uri_batches = [["at://did:plc:6g5yk33tv2wwn2or3ufhoqzj/app.bsky.feed.post/3lybvjbnd4t2d"]]
 
 url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
 
@@ -44,6 +46,8 @@ with open('sentiment_results.csv', 'w', encoding="utf-8", newline='') as outputF
         if response.status_code == 200:
             data = response.json()
             posts = data.get("posts", [])
+
+            print(json.dumps(data, indent = 2))
 
             for post in posts:
                 author = post["author"]["handle"]

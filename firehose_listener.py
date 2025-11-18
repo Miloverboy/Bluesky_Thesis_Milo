@@ -3,10 +3,11 @@ import websockets
 import json
 import re
 import time
-from atproto import AsyncFirehoseSubscribeReposClient
+from atproto import AsyncFirehoseSubscribeReposClient, CAR, CID
 from atproto_core import cbor
 from datetime import datetime, timezone
 import numpy
+import dag_cbor
 
 
 uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
@@ -17,8 +18,8 @@ async def main():
     processed = 0
     called = 0
     times = []
-    posts_to_store = []
-
+    posts_to_store = set()
+    isMatch = False
 
 
     async def handle_post(op):
@@ -28,18 +29,41 @@ async def main():
             #print(action)
             i = 0
         else:
+            if len(posts_to_store) > 50000:
+                return
+            elif len(posts_to_store) % 1000 == 0:
+                print(f'length: {len(posts_to_store)}')
+            raw_post_cid = op.get('cid')
+            post_cid = CID.decode(raw_post_cid)
+            print(CID.decode(raw_post_cid))
+            print(op)
+            await client.stop()
+            #print(f'post: {raw_post_cid}')
             #print(op)
             if True:
-                post_id = op.get("path").split("/")[-1]
-                posts_to_store.append(post_id)
+                posts_to_store.add(raw_post_cid)
 
 
     async def handle_repost(op):
+        nonlocal isMatch
         nonlocal posts_to_store
+        
         action = op.get("action","")
+        raw_post_cid = op.get('cid')
+        print(CID.decode(raw_post_cid))
+        print(op)
+        #await client.stop()
+        #print(raw_post_cid)
+        #post_cid = CID.decode(raw_post_cid)
+        #print(f'repost: {raw_post_cid}')
         if action != "create":
             i = 0
-            print(op)
+            #print(op)
+        elif raw_post_cid in posts_to_store:
+          print('match!')
+          isMatch = True
+          print(raw_post_cid)
+            
 
             
                 
@@ -54,13 +78,38 @@ async def main():
         called += 1
 
         ops = event.body.get("ops", [])
+        
         for op in ops:
             type = op.get("path", "")
             if type.startswith("app.bsky.feed.repost") :
+                #print(f'cid: {post_cid}')
+                #print('called')
                 await handle_repost(op)
-                for CBOR_block in event.body['blocks']:
-                    block = await cbor.decode_dag(CBOR_block)
-                    print(block)
+                #print(event)
+                #print(await dag_cbor.decode(event.body['blocks']))
+                #await client.stop()
+                break
+                reader = CAR.from_bytes(event.body["blocks"])
+                blocks = reader.blocks#.get(op.get('cid'))
+                for block in blocks.values():
+                  #print(f'blockie: {block} \n')
+                  for e in block.get('e', []):
+                      e_cid = CID.decode(e.get('v'))
+                      if post_cid == e_cid:
+                        print(e)
+                      #print(key_str)
+                      #print(post_cid)
+                      #if str(post_cid) in key_str:
+                          #original_post = e.get("v")
+                          #print(original_post)
+                  #record = dag_cbor.decode(record_bytes)
+                  #print(record)
+                
+                #for CBOR_block in event.body['blocks']:
+                    #print(CBOR_block)
+                    #block = await dag_cbor.decode(CBOR_block)
+                
+                    
 
                 await client.stop()
               
@@ -79,12 +128,21 @@ async def main():
                 print(event.body)
             times.append(taken_time.total_seconds())
             processed += 1
+    
+    async def isMatch():
+        nonlocal isMatch
+        while isMatch != True:
+            await asyncio.sleep(5)
+        print(isMatch)
+        return
         
 
     client.on_repo_commit = listen_to_websocket
     task = asyncio.create_task(client.start(listen_to_websocket))
-    await asyncio.sleep(10)
+    #await asyncio.sleep(100)
+    await isMatch()
     await client.stop()
+    
     await task
     print(f"first: {times[0]}, last: {times[len(times)-1]}, average: {numpy.average(times)}")
     print(f"called: {called}, processed: {processed}, useless: {useless}")
