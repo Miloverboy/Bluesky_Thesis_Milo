@@ -3,27 +3,35 @@ from atproto import AsyncFirehoseSubscribeReposClient, CAR, CID
 #from atproto_core import cbor
 from datetime import datetime, timezone
 import numpy
-# import python_test_2
+#import python_test_2
 import sqlite3
 import os
 import argparse
+import time
 
 
 uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 
-def create_tables(cursor):
-    cursor.execute('CREATE TABLE IF NOT EXISTS posts(cid, uri)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS reposts(post_cid, user_id, time, FOREIGN KEY (post_cid) REFERENCES posts (cid))')
+def create_tables(cursor: sqlite3.Cursor):
+    cursor.execute('PRAGMA foreign_keys = ON')
+    cursor.execute('CREATE TABLE IF NOT EXISTS posts(cid TEXT, uri TEXT NOT NULL UNIQUE, PRIMARY KEY(uri))')
+    cursor.execute('CREATE TABLE IF NOT EXISTS reposts(post_cid TEXT, post_uri TEXT, user_id INTEGER, time, FOREIGN KEY(post_uri) REFERENCES posts(uri) ON DELETE CASCADE)')
 
 def delete_tables(cursor):
     cursor.execute('DROP TABLE IF EXISTS posts')
     cursor.execute('DROP TABLE IF EXISTS reposts')
 
 def insert_post(cursor, post_cid, post_uri):
+    # print('i')
+    # print(post_cid)
     cursor.execute('INSERT INTO posts (cid, uri) VALUES (?, ?)', (post_cid, post_uri))
 
-def insert_repost(cursor, post_cid, user_id, time):
-    cursor.execute('INSERT INTO reposts (post_cid, user_id, time) VALUES (?, ?, ?)', (post_cid, user_id, time))
+def insert_repost(cursor, post_cid, post_uri, user_id, time):    
+    # print(post_cid)
+    
+    cursor.execute('INSERT INTO reposts (post_cid, post_uri, user_id, time) VALUES (?, ?, ?, ?)', (post_cid, post_uri, user_id, time))
+    print('repost')
+
 
 def commit_inserts(database, last_seq):
     database.commit()
@@ -48,7 +56,7 @@ async def main(last_seq):
     create_tables(cursor)
 
 
-    async def handle_post(op):
+    async def handle_post(op, repo):
         nonlocal posts_to_store
         nonlocal execute_counter
         action = op.get("action","")
@@ -61,9 +69,20 @@ async def main(last_seq):
             elif len(posts_to_store) % 100 == 0:
                 print(f'length: {len(posts_to_store)}')
                 
-            post_uri = op.get('path').split(r'/')[1]
+
+            path = op.get('path')#.split(r'/')[1]
+            post_uri = f'at://{repo}/{path}'
             raw_post_cid = op.get('cid')
-            post_cid = str(CID.decode(raw_post_cid))   
+            post_cid = str(CID.decode(raw_post_cid))
+
+            #await client.stop()
+            #print(post_cid)
+            #print(post_uri)
+
+            #iii = carFile.blocks[post_cid]
+            #print(iii)
+            
+            #python_test_2.getPosts([iii.get('uri')])   
             #print(f'post: {post_cid}')
             #print(op)
             if True:
@@ -78,7 +97,7 @@ async def main(last_seq):
         nonlocal posts_to_store
         nonlocal execute_counter
 
-
+        
         
         action = op.get("action","")      
 
@@ -92,20 +111,52 @@ async def main(last_seq):
             i = 0
             #print(op)
         else: 
-            raw_post_cid = op.get('cid')
-            post_cid = str(CID.decode(raw_post_cid))
-            for key in carFile.blocks.keys():
-                if str(key) == post_cid:
-                    repostedUriFull = carFile.blocks[key].get('subject').get('uri')
-                    repostedUri = repostedUriFull.split('/')[-1]
+            raw_repost_cid = op.get('cid')
+            repost_cid = str(CID.decode(raw_repost_cid))
+            # print(op)
+            # print(carFile.blocks.keys())
+
+            subject = carFile.blocks[repost_cid].get('subject')
+
+            post_cid = subject.get('cid')
+            post_uri = subject.get('uri')
+            #print(post_uri)
+            # print(post_cid)
+            if post_uri in posts_to_store:
+                        print(post_uri)
+                        print(post_cid)
+            if post_cid == None:
+                print('repost_cid not pointing to anything')
+            else: 
+                #await client.stop()
+
+
+                try:
+                    #python_test_2.getPosts([post_uri])
+                    insert_repost(cursor, post_cid, post_uri, 1, datetime.now(timezone.utc))
+                    isMatch += 1
+                    execute_counter += 1
+                    
+                except Exception as e:
+                        #print(e)
+                        pass
+
+            return
             
-          
-            if repostedUri in posts_to_store:
-                #print('match!')
-                isMatch += 1
-                insert_repost(cursor, post_cid, 1, datetime.now(timezone.utc))
-                execute_counter += 1
-                #print(repostedUri)
+            for key in carFile.blocks.keys():
+                print(f'{key} -----> {carFile.blocks[key]} \n')
+                # print(carFile.blocks[key])
+                if str(key) == post_cid:
+                    try:
+                        repostedUriFull = carFile.blocks[key].get('subject').get('uri')
+                        print(repostedUriFull)
+                        await client.stop()
+                        insert_repost(cursor, post_cid, 1, datetime.now(timezone.utc))
+                        isMatch += 1
+                        execute_counter += 1
+                    except Exception as e:
+                        pass
+            #print(repostedUri)
 
                 #python_test_2.getPosts([repostedUriFull])
             #print(f'checked {repostedUri}')
@@ -123,44 +174,58 @@ async def main(last_seq):
         nonlocal useless
         nonlocal execute_counter
 
+        start = time.perf_counter()
 
         seq = event.body.get('seq')   
 
         called += 1
+        #print(event)
+
+        
 
         ops = event.body.get("ops", [])
         #print(event)
         #print (event.body.get('blocks'))
+        carFile = None
         
         for op in ops:
             opType = op.get("path", "")
             if opType.startswith("app.bsky.feed.repost") :
                 
-                carFile = CAR.from_bytes(event.body['blocks'])
+                if carFile == None:
+                    carFile = CAR.from_bytes(event.body['blocks'])
+                
                 await handle_repost(op, carFile)
               
             elif opType.startswith("app.bsky.feed.post") :
-                await handle_post(op)
+                
+                repo = event.body.get('repo')
+
+                await handle_post(op, repo)
                 
             else: 
                 useless += 1
                 return
                 print(type)
-            time = event.body.get("time")
-            if time != None: 
-                event_time = datetime.fromisoformat(time.replace("Z", "+00:00"))
+            event_time = event.body.get("time")
+            if event_time != None: 
+                event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
                 taken_time = datetime.now(timezone.utc) - event_time
             else:
                 print(event.body)
             times.append(taken_time.total_seconds())
             processed += 1
-        if execute_counter % 100 == 0:
+        if execute_counter % 100 == 1:
             commit_inserts(database, seq)
+        end = time.perf_counter()
+        elapsed = end - start
+        #print(f'time: {elapsed}')
     
     async def Match():
         nonlocal isMatch
-        while isMatch < 500:
-            await asyncio.sleep(5)
+        while isMatch < 20:
+            await asyncio.sleep(2)
+            #isMatch += 1
         print(isMatch)
         return
         

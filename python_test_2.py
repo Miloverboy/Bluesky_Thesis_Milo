@@ -26,7 +26,7 @@ for index, row in data.iterrows():
 
 def getPosts(uri_batches):
 
-    #uri_batches = [["at://did:plc:6g5yk33tv2wwn2or3ufhoqzj/app.bsky.feed.post/3lybvjbnd4t2d"]]
+    # uri_batches = [["at://did:plc:2ucib6krqt5gneltbwa3d6t7/app.bsky.feed.post/3m65uekifas2c"]]
     #print('t')
 
     url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
@@ -50,9 +50,12 @@ def getPosts(uri_batches):
 
             response = requests.get(url, params={"uris": uris})
 
+            
+
             if response.status_code == 200:
                 data = response.json()
                 posts = data.get("posts", [])
+                print(data)
 
                 #print(json.dumps(data, indent = 2))
 
@@ -86,7 +89,10 @@ def getPosts(uri_batches):
                         
             else:
                 print(f"Error {response.status_code}: {response.text}")
+                print(uris)
 
         #print(f" unreposted: {unrepostedCount} \n reposted: {repostedCount} \n no text: {noTextCount} \n other languages: {notEnglishCount}")
 
         if (any(failedText)) : print(failedText)
+
+#getPosts(uri_batches)
