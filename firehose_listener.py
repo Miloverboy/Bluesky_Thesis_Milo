@@ -15,7 +15,7 @@ uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsk
 def create_tables(cursor: sqlite3.Cursor):
     cursor.execute('PRAGMA foreign_keys = ON')
     cursor.execute('CREATE TABLE IF NOT EXISTS posts(cid TEXT, uri TEXT NOT NULL UNIQUE, PRIMARY KEY(uri))')
-    cursor.execute('CREATE TABLE IF NOT EXISTS reposts(post_cid TEXT, post_uri TEXT, user_id INTEGER, time, FOREIGN KEY(post_uri) REFERENCES posts(uri) ON DELETE CASCADE)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS reposts(post_cid TEXT, post_uri TEXT, reposter_did INTEGER, time, FOREIGN KEY(post_uri) REFERENCES posts(uri) ON DELETE CASCADE)')
 
 def delete_tables(cursor):
     cursor.execute('DROP TABLE IF EXISTS posts')
@@ -26,10 +26,10 @@ def insert_post(cursor, post_cid, post_uri):
     # print(post_cid)
     cursor.execute('INSERT INTO posts (cid, uri) VALUES (?, ?)', (post_cid, post_uri))
 
-def insert_repost(cursor, post_cid, post_uri, user_id, time):    
+def insert_repost(cursor, post_cid, post_uri, reposter_did, time):    
     # print(post_cid)
     
-    cursor.execute('INSERT INTO reposts (post_cid, post_uri, user_id, time) VALUES (?, ?, ?, ?)', (post_cid, post_uri, user_id, time))
+    cursor.execute('INSERT INTO reposts (post_cid, post_uri, reposter_did, time) VALUES (?, ?, ?, ?)', (post_cid, post_uri, reposter_did, time))
     print('repost')
 
 
@@ -92,14 +92,14 @@ async def main(last_seq):
                 #print(f'added {post_uri}')
 
 
-    async def handle_repost(op, carFile):
+    async def handle_repost(op, carFile, repo):
         nonlocal isMatch
         nonlocal posts_to_store
         nonlocal execute_counter
 
         
         
-        action = op.get("action","")      
+        action = op.get("action","")     
 
         
 
@@ -120,6 +120,7 @@ async def main(last_seq):
 
             post_cid = subject.get('cid')
             post_uri = subject.get('uri')
+            
             #print(post_uri)
             # print(post_cid)
             if post_uri in posts_to_store:
@@ -133,7 +134,7 @@ async def main(last_seq):
 
                 try:
                     #python_test_2.getPosts([post_uri])
-                    insert_repost(cursor, post_cid, post_uri, 1, datetime.now(timezone.utc))
+                    insert_repost(cursor, post_cid, post_uri, repo, datetime.now(timezone.utc))
                     isMatch += 1
                     execute_counter += 1
                     
@@ -182,7 +183,7 @@ async def main(last_seq):
         #print(event)
 
         
-
+        repo = event.body.get('repo')
         ops = event.body.get("ops", [])
         #print(event)
         #print (event.body.get('blocks'))
@@ -195,11 +196,11 @@ async def main(last_seq):
                 if carFile == None:
                     carFile = CAR.from_bytes(event.body['blocks'])
                 
-                await handle_repost(op, carFile)
+                await handle_repost(op, carFile, repo)
               
             elif opType.startswith("app.bsky.feed.post") :
                 
-                repo = event.body.get('repo')
+                
 
                 await handle_post(op, repo)
                 
@@ -223,7 +224,7 @@ async def main(last_seq):
     
     async def Match():
         nonlocal isMatch
-        while isMatch < 20:
+        while isMatch < 100:
             await asyncio.sleep(2)
             #isMatch += 1
         print(isMatch)
