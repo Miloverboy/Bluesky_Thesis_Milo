@@ -7,6 +7,7 @@ from langdetect.lang_detect_exception import LangDetectException
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from  roberta_sentiment import roberta_sentiment
 import csv
+import fasttext
 
 
 
@@ -40,6 +41,8 @@ def getPosts(uri_batches):
 
     analyzer = SentimentIntensityAnalyzer() # Vader sentiment analyser
 
+    model = fasttext.load_model("lid.176.bin")
+
 
 
     with open('sentiment_results.csv', 'w', encoding="utf-8", newline='') as outputFile:
@@ -55,7 +58,6 @@ def getPosts(uri_batches):
             if response.status_code == 200:
                 data = response.json()
                 posts = data.get("posts", [])
-                print(data)
 
                 #print(json.dumps(data, indent = 2))
 
@@ -91,8 +93,10 @@ def getPosts(uri_batches):
                 print(f"Error {response.status_code}: {response.text}")
                 print(uris)
 
-        #print(f" unreposted: {unrepostedCount} \n reposted: {repostedCount} \n no text: {noTextCount} \n other languages: {notEnglishCount}")
+        print(f" unreposted: {unrepostedCount} \n reposted: {repostedCount} \n no text: {noTextCount} \n other languages: {notEnglishCount}")
 
         if (any(failedText)) : print(failedText)
 
-#getPosts(uri_batches)
+getPosts(uri_batches)
+
+#print(detect('저, 저저.... 기껏 키워 놨더니 형한테 하는 거 봐라.'))
