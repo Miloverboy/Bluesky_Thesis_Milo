@@ -142,12 +142,15 @@ async def main(last_seq):
                 print(f"None: {post_block}")
                 return False
             if not valid_time(post_time):
+                print('time')
                 return False
 
             if embed != None:
+                print('embed')
                 return
 
             if random.random() <= SAMPLE_RATE:
+                print('saving')
                 insert_post(cursor, post_cid, post_uri, post_time, post_text)
                 return True
             return False
@@ -223,6 +226,7 @@ async def main(last_seq):
 
             elif opType.startswith("app.bsky.feed.post/"):
 
+                
                 if handle_post(op, carFile, repo):
                     execute_counter += 1
 
@@ -256,6 +260,7 @@ async def main(last_seq):
 
     task = asyncio.create_task(client.start(listen_to_websocket))
 
+    
     await asyncio.sleep(TRACKING_TIME_SEC)
     print("Stopping")
     # await Match()
