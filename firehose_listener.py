@@ -14,14 +14,14 @@ import random
 
 REPOST_MAX_TIME_FRAME_SEC = 24 * 60 * 60
 MAX_ACTUAL_TIME_DIFFERENCE_SEC = 120
-TRACKING_TIME_SEC = 60 * 60 * 14
-SAMPLE_RATE = 0.4
+TRACKING_TIME_SEC = 60 * 60 * 24 * 15
+SAMPLE_RATE = 1
 
 os.makedirs('./data', exist_ok=True)
 database = sqlite3.connect(f"./data/{datetime.now().strftime('%m-%d-%Y_%H-%M')}.db")
 database.execute("PRAGMA journal_mode=WAL;")
 database.execute("PRAGMA synchronous=NORMAL;")
-#uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
+# uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 
 
 class TooLateException(Exception):
@@ -36,11 +36,11 @@ def create_tables(cursor: sqlite3.Cursor):
     cursor.execute("PRAGMA foreign_keys = ON")
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS posts(
-                   post_cid TEXT, 
-                   post_uri TEXT NOT NULL UNIQUE, 
+                   post_cid TEXT NOT NULL UNIQUE,
+                   post_uri TEXT NOT NULL, 
                    post_time TEXT NOT NULL, 
                    post_text TEXT, 
-                   PRIMARY KEY(post_uri))"""
+                   PRIMARY KEY(post_cid))"""
     )
 
     cursor.execute(
@@ -48,9 +48,9 @@ def create_tables(cursor: sqlite3.Cursor):
                    post_cid TEXT,
                    post_uri TEXT, 
                    reposter_did INTEGER, 
-                   time TEXT, 
-                   FOREIGN KEY(post_uri) 
-                   REFERENCES posts(post_uri) 
+                   repost_time TEXT, 
+                   FOREIGN KEY(post_cid) 
+                   REFERENCES posts(post_cid) 
                    ON DELETE CASCADE)"""
     )
 
@@ -78,7 +78,7 @@ def insert_repost(
         seconds_diff = (repost_time - datetime.fromisoformat(post_time)).total_seconds()
         if seconds_diff <= REPOST_MAX_TIME_FRAME_SEC:
             cursor.execute(
-                "INSERT INTO reposts (post_cid, post_uri, reposter_did, time) VALUES (?, ?, ?, ?)",
+                "INSERT INTO reposts (post_cid, post_uri, reposter_did, repost_time) VALUES (?, ?, ?, ?)",
                 (post_cid, post_uri, reposter_did, repost_time),
             )
         else:
@@ -92,6 +92,13 @@ def commit_inserts(database, last_seq):
     with open("last_seq.txt", "w") as output_file:
         output_file.write(str(last_seq))
 
+async def monitor_loop():
+    while True:
+        start = asyncio.get_running_loop().time()
+        await asyncio.sleep(10)
+        end = asyncio.get_running_loop().time()
+        lag = end - start - 10
+        print(f"Event loop lag: {lag:.4f}s, Total tasks: {len(asyncio.all_tasks())}")
 
 async def main(last_seq):
     client = AsyncFirehoseSubscribeReposClient(params={"cursor": last_seq})
@@ -100,8 +107,8 @@ async def main(last_seq):
     called = 0
     times = []
     isMatch = 0
-    last_seq = None
     execute_counter = 0
+    last_event_seq = last_seq
 
     cursor = database.cursor()
 
@@ -127,37 +134,37 @@ async def main(last_seq):
         if action != "create":
             i = 0
         else:
-            path = op.get("path")
-            post_uri = f"at://{repo}/{path}"
-            raw_post_cid = op.get("cid")
-            post_cid = str(CID.decode(raw_post_cid))
-            post_block = carFile.blocks[post_cid]
-            embed = post_block.get("embed")
-            reply = post_block.get("reply")
-            langs = post_block.get("langs")
+            try:
+                path = op.get("path")
+                post_uri = f"at://{repo}/{path}"
+                raw_post_cid = op.get("cid")
+                post_cid = str(CID.decode(raw_post_cid))
+                post_block = carFile.blocks[post_cid]
+                embed = post_block.get("embed")
+                reply = post_block.get("reply")
+                langs = post_block.get("langs")
+                if langs == None or "en" not in langs or embed != None or reply != None:
+                    return False
+                post_time = generalize_time(post_block.get("createdAt"))
+                post_text = post_block.get("text")
 
+                if post_text == None:
+                    print(f"None: {post_block}")
+                    return False
+                if not valid_time(post_time):
+                    print('time')
+                    return False
 
+                if embed != None:
+                    print('embed')
+                    return
 
-            if langs == None or "en" not in langs or embed != None or reply != None:
-                return False
-            post_time = generalize_time(post_block.get("createdAt"))
-            post_text = post_block.get("text")
-
-            if post_text == None:
-                print(f"None: {post_block}")
-                return False
-            if not valid_time(post_time):
-                print('time')
-                return False
-
-            if embed != None:
-                print('embed')
-                return
-
-            if random.random() <= SAMPLE_RATE:
-                print('saving')
-                insert_post(cursor, post_cid, post_uri, post_time, post_text)
-                return True
+                if random.random() <= SAMPLE_RATE:
+                    #print('saving')
+                    insert_post(cursor, post_cid, post_uri, post_time, post_text)
+                    return True
+            except Exception as e:
+                pass
             return False
 
     def handle_repost(op, carFile, repo):
@@ -168,30 +175,33 @@ async def main(last_seq):
             i = 0
 
         else:
-            raw_repost_cid = op.get("cid")
-            repost_cid = str(CID.decode(raw_repost_cid))
+            try:
+                raw_repost_cid = op.get("cid")
+                repost_cid = str(CID.decode(raw_repost_cid))
 
-            subject = carFile.blocks[repost_cid].get("subject")
+                subject = carFile.blocks[repost_cid].get("subject")
 
-            post_cid = subject.get("cid")
-            post_uri = subject.get("uri")
+                post_cid = subject.get("cid")
+                post_uri = subject.get("uri")
 
-            if post_cid == None:
-                print("repost_cid not pointing to anything")
-            else:
+                if post_cid == None:
+                    print("repost_cid not pointing to anything")
+                else:
 
-                try:
-                    # python_test_2.getPosts([post_uri])
-                    insert_repost(
-                        cursor, post_cid, post_uri, repo, datetime.now(timezone.utc)
-                    )
-                    return True
+                    try:
+                        # python_test_2.getPosts([post_uri])
+                        insert_repost(
+                            cursor, post_cid, post_uri, repo, datetime.now(timezone.utc)
+                        )
+                        return True
 
-                except PostNotTrackedException:
-                    pass
+                    except PostNotTrackedException:
+                        pass
 
-                except Exception as e:
-                    print(e)
+                    except Exception as e:
+                        print(e)
+            except Exception as e:
+                pass
 
             return False
 
@@ -201,14 +211,19 @@ async def main(last_seq):
         nonlocal times
         nonlocal useless
         nonlocal execute_counter
+        nonlocal last_event_seq
+        nonlocal last_seq
 
         if event.header.op != 1:
-            print(event)
+            #print(event)
             return
 
         start = time.perf_counter()
 
         seq = event.body.get("seq")
+        if last_event_seq and seq != last_event_seq + 1:
+            print(f'seq {seq} mismatches last_seq {last_event_seq}')
+        last_event_seq = seq
 
         called += 1
         # print(event)
@@ -219,7 +234,10 @@ async def main(last_seq):
         if len(ops) == 0:
             return
 
-        carFile = CAR.from_bytes(event.body["blocks"])
+        try:
+            carFile = CAR.from_bytes(event.body["blocks"])
+        except Exception as e:
+            pass
 
         for op in ops:
 
@@ -231,17 +249,7 @@ async def main(last_seq):
 
             elif opType.startswith("app.bsky.feed.post/"):
 
-                if len(carFile.blocks) <= 5:
-                    print(op)
-                    raw_post_cid = op.get("cid")
-                    print(raw_post_cid)
-                    post_cid = str(CID.decode(raw_post_cid))
-                    print(post_cid)
-
-                    print(f'Everything: {event.body} \n \n')
-                    print(f'Carfile: {carFile} \n Blocks: {carFile.blocks} \n post_block: {carFile.blocks[post_cid]} \n \n')
-                else:
-                    print(len(carFile.blocks))
+                
                 if handle_post(op, carFile, repo):
                     execute_counter += 1
 
@@ -254,11 +262,12 @@ async def main(last_seq):
                 event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
                 taken_time = datetime.now(timezone.utc) - event_time
             else:
-                print(event.body)
+                print('no time')
 
             processed += 1
         if execute_counter % 500 == 1:
             commit_inserts(database, seq)
+        last_seq = seq
         end = time.perf_counter()
         elapsed = end - start
         times.append(elapsed)
@@ -275,11 +284,11 @@ async def main(last_seq):
 
     task = asyncio.create_task(client.start(listen_to_websocket))
 
-    
+    asyncio.create_task(monitor_loop())
     await asyncio.sleep(TRACKING_TIME_SEC)
     print("Stopping")
     # await Match()
-    commit_inserts(database, 2)
+    #commit_inserts(database, 2)
 
     await client.stop()
     
@@ -288,7 +297,7 @@ async def main(last_seq):
             f"first: {times[0]}, last: {times[len(times)-1]}, average: {numpy.average(times)}"
         )
         print(f"called: {called}, processed: {processed}, useless: {useless}")
-        print(times[::500])
+        #print(times[::500])
 
 
 parser = argparse.ArgumentParser(
