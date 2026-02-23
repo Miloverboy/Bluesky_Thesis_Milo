@@ -19,7 +19,9 @@ SAMPLE_RATE = 0.4
 
 os.makedirs('./data', exist_ok=True)
 database = sqlite3.connect(f"./data/{datetime.now().strftime('%m-%d-%Y_%H-%M')}.db")
-uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
+database.execute("PRAGMA journal_mode=WAL;")
+database.execute("PRAGMA synchronous=NORMAL;")
+#uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 
 
 class TooLateException(Exception):
@@ -133,6 +135,9 @@ async def main(last_seq):
             embed = post_block.get("embed")
             reply = post_block.get("reply")
             langs = post_block.get("langs")
+
+
+
             if langs == None or "en" not in langs or embed != None or reply != None:
                 return False
             post_time = generalize_time(post_block.get("createdAt"))
@@ -226,7 +231,17 @@ async def main(last_seq):
 
             elif opType.startswith("app.bsky.feed.post/"):
 
-                
+                if len(carFile.blocks) <= 5:
+                    print(op)
+                    raw_post_cid = op.get("cid")
+                    print(raw_post_cid)
+                    post_cid = str(CID.decode(raw_post_cid))
+                    print(post_cid)
+
+                    print(f'Everything: {event.body} \n \n')
+                    print(f'Carfile: {carFile} \n Blocks: {carFile.blocks} \n post_block: {carFile.blocks[post_cid]} \n \n')
+                else:
+                    print(len(carFile.blocks))
                 if handle_post(op, carFile, repo):
                     execute_counter += 1
 
@@ -242,7 +257,7 @@ async def main(last_seq):
                 print(event.body)
 
             processed += 1
-        if execute_counter % 25 == 1:
+        if execute_counter % 500 == 1:
             commit_inserts(database, seq)
         end = time.perf_counter()
         elapsed = end - start
