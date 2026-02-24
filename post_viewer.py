@@ -1,6 +1,6 @@
 import requests
 
-uri = 'at://did:plc:puysacjz5dvhzf73uuv2pbxm/app.bsky.feed.post/3ma4lly3n6s24'
+uri = 'at://did:plc:7wggz3lwumigckbfms7j4trd/app.bsky.feed.post/3mfma3g2eqc22'
 url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
 
 # response = requests.get(url, params={"uris": uris})

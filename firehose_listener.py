@@ -1,5 +1,5 @@
-import asyncio
-from atproto import AsyncFirehoseSubscribeReposClient, CAR, CID, firehose_models
+
+from atproto import FirehoseSubscribeReposClient, CAR, CID, firehose_models
 
 # from atproto_core import cbor
 from datetime import datetime, timezone, timedelta
@@ -11,14 +11,34 @@ import os
 import argparse
 import time
 import random
+import langid
+import json
 
-REPOST_MAX_TIME_FRAME_SEC = 24 * 60 * 60
+import requests
+
+metadata = {
+    'called' : 0,
+    'langid_english' : 0,
+    'langid_not_english' : 0,
+    'english_tag' : 0,
+    'not_english_tag' : 0,
+    'valid_time_count' : 0,
+    'invalid_time' : 0,
+    'no_reply' : 0,
+    'reply' : 0,
+    'no_embed' : 0,
+    'embed' : 0,
+    'invalid_repost_time' : 0
+    }
+
+POST_MAX_TRACKING_TIME_SEC = 24 * 60 * 60
 MAX_ACTUAL_TIME_DIFFERENCE_SEC = 120
 TRACKING_TIME_SEC = 60 * 60 * 24 * 15
 SAMPLE_RATE = 1
+database_name = datetime.now().strftime('%m-%d-%Y_%H-%M')
 
 os.makedirs('./data', exist_ok=True)
-database = sqlite3.connect(f"./data/{datetime.now().strftime('%m-%d-%Y_%H-%M')}.db")
+database = sqlite3.connect(f"./data/{database_name}.db")
 database.execute("PRAGMA journal_mode=WAL;")
 database.execute("PRAGMA synchronous=NORMAL;")
 # uri = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
@@ -36,22 +56,30 @@ def create_tables(cursor: sqlite3.Cursor):
     cursor.execute("PRAGMA foreign_keys = ON")
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS posts(
-                   post_cid TEXT NOT NULL UNIQUE,
-                   post_uri TEXT NOT NULL, 
-                   post_time TEXT NOT NULL, 
-                   post_text TEXT, 
-                   PRIMARY KEY(post_cid))"""
-    )
-
+                post_cid TEXT NOT NULL UNIQUE,
+                post_uri TEXT NOT NULL UNIQUE, 
+                post_time TEXT NOT NULL, 
+                post_text TEXT, 
+                delete_time TEXT,
+                likes_count INTEGER,
+                likes_checked BOOLEAN DEFAULT FALSE,
+                check_at TEXT,
+                is_news BOOLEAN,
+                PRIMARY KEY(post_cid))""")
+    cursor.execute(
+        """CREATE INDEX likes_check_index ON posts(likes_checked, check_at)""")
+    
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS reposts(
-                   post_cid TEXT,
-                   post_uri TEXT, 
-                   reposter_did INTEGER, 
-                   repost_time TEXT, 
-                   FOREIGN KEY(post_cid) 
-                   REFERENCES posts(post_cid) 
-                   ON DELETE CASCADE)"""
+                post_cid TEXT,
+                post_uri TEXT, 
+                repost_uri TEXT NOT NULL UNIQUE,
+                repost_time TEXT,
+                delete_time TEXT, 
+                PRIMARY KEY(repost_uri),
+                FOREIGN KEY(post_cid) 
+                REFERENCES posts(post_cid) 
+                ON DELETE CASCADE)"""
     )
 
 
@@ -60,31 +88,49 @@ def delete_tables(cursor):
     cursor.execute("DROP TABLE IF EXISTS reposts")
 
 
-def insert_post(cursor, post_cid, post_uri, post_time, post_text):
+def insert_post(cursor, post_cid, post_uri, post_time, post_text, is_news):
+
+    check_likes_at = post_time + timedelta(seconds = 60)#timedelta(seconds=POST_MAX_TRACKING_TIME_SEC)
+
+    try:
+        cursor.execute(
+            "INSERT INTO posts (post_cid, post_uri, post_time, post_text, is_news, check_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (post_cid, post_uri, post_time, post_text, is_news, check_likes_at),
+        )
+    except sqlite3.IntegrityError:
+        print(f"Post with cid {post_cid} already exists in the database. : \n {post_text}")
+        pass
+
+def delete_post(cursor, post_cid, delete_time):
 
     cursor.execute(
-        "INSERT INTO posts (post_cid, post_uri, post_time, post_text) VALUES (?, ?, ?, ?)",
-        (post_cid, post_uri, post_time, post_text),
+        "UPDATE posts SET delete_time = ? WHERE post_cid = ?", 
+        (delete_time, post_cid)
     )
 
-
 def insert_repost(
-    cursor: sqlite3.Cursor, post_cid, post_uri, reposter_did, repost_time: datetime
+    cursor: sqlite3.Cursor, post_cid, post_uri, repost_uri, repost_time: datetime
 ):
     cursor.execute("SELECT post_time FROM posts WHERE post_cid = ? ", (post_cid,))
     post_time = cursor.fetchone()
     if post_time:
         post_time = post_time[0]
         seconds_diff = (repost_time - datetime.fromisoformat(post_time)).total_seconds()
-        if seconds_diff <= REPOST_MAX_TIME_FRAME_SEC:
+        if seconds_diff <= POST_MAX_TRACKING_TIME_SEC:
             cursor.execute(
-                "INSERT INTO reposts (post_cid, post_uri, reposter_did, repost_time) VALUES (?, ?, ?, ?)",
-                (post_cid, post_uri, reposter_did, repost_time),
+                "INSERT INTO reposts (post_cid, post_uri, repost_uri, repost_time) VALUES (?, ?, ?, ?)",
+                (post_cid, post_uri, repost_uri, repost_time),
             )
         else:
             raise TooLateException(f"{repost_time} Too far after {post_time}")
     else:
         raise PostNotTrackedException()
+
+def delete_repost(cursor, repost_uri, delete_time):
+    cursor.execute(
+        "UPDATE reposts SET delete_time = ? WHERE repost_uri = ?", 
+        (delete_time, repost_uri)
+    )
 
 
 def commit_inserts(database, last_seq):
@@ -92,25 +138,34 @@ def commit_inserts(database, last_seq):
     with open("last_seq.txt", "w") as output_file:
         output_file.write(str(last_seq))
 
-async def monitor_loop():
+def check_likes(database, cursor):
+    cursor.execute("SELECT post_uri FROM posts WHERE likes_checked = FALSE AND check_at <= ?", (datetime.now(timezone.utc),))
     while True:
-        start = asyncio.get_running_loop().time()
-        await asyncio.sleep(10)
-        end = asyncio.get_running_loop().time()
-        lag = end - start - 10
-        print(f"Event loop lag: {lag:.4f}s, Total tasks: {len(asyncio.all_tasks())}")
+        uris = cursor.fetchmany(25)
+        print(len(uris))
+        if not uris:
+            break
+        url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
+        response = requests.get(url, params={"uris": uris})
+        if response.status_code == 200:
+            data = response.json()
+            posts = data.get("posts", [])
+            for post in posts:
+                post_uri = post["uri"]
+                likes_count = post["likeCount"]
+                print(post_uri, likes_count)
+                cursor.execute("UPDATE posts SET likes_count = ?, likes_checked = TRUE WHERE post_uri = ?", (likes_count, post_uri))
 
-async def main(last_seq):
-    client = AsyncFirehoseSubscribeReposClient(params={"cursor": last_seq})
-    useless = 0
-    processed = 0
-    called = 0
-    times = []
-    isMatch = 0
+
+
+def main(last_seq):
+    client = FirehoseSubscribeReposClient(params={"cursor": last_seq})
+
     execute_counter = 0
     last_event_seq = last_seq
 
     cursor = database.cursor()
+    news_dids = json.load(open('news_dids.json', 'r'))
 
     delete_tables(cursor)
     create_tables(cursor)
@@ -131,58 +186,101 @@ async def main(last_seq):
 
     def handle_post(op, carFile, repo):
         action = op.get("action", "")
+        path = op.get("path")
+        post_uri = f"at://{repo}/{path}"
+        
         if action != "create":
-            i = 0
+            if action == "delete":
+                
+                delete_post(cursor, post_uri, datetime.now(timezone.utc))
+                return True
+            
         else:
             try:
-                path = op.get("path")
-                post_uri = f"at://{repo}/{path}"
+                news_post = False
+
+                if repo in news_dids:
+                    news_post = True
+
                 raw_post_cid = op.get("cid")
                 post_cid = str(CID.decode(raw_post_cid))
                 post_block = carFile.blocks[post_cid]
                 embed = post_block.get("embed")
                 reply = post_block.get("reply")
                 langs = post_block.get("langs")
-                if langs == None or "en" not in langs or embed != None or reply != None:
+                
+                if reply != None:
+                    metadata['reply'] += 1
                     return False
+                metadata['no_reply'] += 1
+
+                if news_post == False:
+                    if embed != None:
+                        metadata['embed'] += 1
+                        return False
+                    metadata['no_embed'] += 1
+                
                 post_time = generalize_time(post_block.get("createdAt"))
+
+                if not valid_time(post_time):
+                    metadata['invalid_time'] += 1
+                    return False
+                metadata['valid_time_count'] += 1
+                
                 post_text = post_block.get("text")
 
                 if post_text == None:
                     print(f"None: {post_block}")
                     return False
-                if not valid_time(post_time):
-                    print('time')
+                
+                if langs == None or "en" in langs:
+                    metadata['english_tag'] += 1
+                    if langid.classify(post_text)[0] == 'en':
+                        metadata['langid_english'] += 1
+
+                    else:
+                        metadata['langid_not_english'] += 1
+                        return False
+                else:   
+                    metadata['not_english_tag'] += 1
                     return False
 
-                if embed != None:
-                    print('embed')
-                    return
-
-                if random.random() <= SAMPLE_RATE:
-                    #print('saving')
-                    insert_post(cursor, post_cid, post_uri, post_time, post_text)
+                if random.random() <= SAMPLE_RATE or news_post == True:
+                    insert_post(cursor, post_cid, post_uri, post_time, post_text, news_post)
                     return True
+                
             except Exception as e:
+                print(e)
                 pass
             return False
 
     def handle_repost(op, carFile, repo):
 
         action = op.get("action", "")
+        path = op.get("path")
+        repost_uri = f"at://{repo}/{path}"  
 
         if action != "create":
-            i = 0
+            if action == "delete":     
+                
+                delete_repost(cursor, repost_uri, datetime.now(timezone.utc))
+                return True
 
         else:
             try:
                 raw_repost_cid = op.get("cid")
                 repost_cid = str(CID.decode(raw_repost_cid))
 
-                subject = carFile.blocks[repost_cid].get("subject")
+                repost_block = carFile.blocks[repost_cid]
+                subject = repost_block.get("subject")
 
+                repost_time = generalize_time(repost_block.get("createdAt"))
                 post_cid = subject.get("cid")
                 post_uri = subject.get("uri")
+
+                if valid_time(repost_time) == False:
+                    repost_time = datetime.now(timezone.utc)
+                    metadata['invalid_repost_time'] += 1
 
                 if post_cid == None:
                     print("repost_cid not pointing to anything")
@@ -191,7 +289,7 @@ async def main(last_seq):
                     try:
                         # python_test_2.getPosts([post_uri])
                         insert_repost(
-                            cursor, post_cid, post_uri, repo, datetime.now(timezone.utc)
+                            cursor, post_cid, post_uri, repost_uri, repost_time
                         )
                         return True
 
@@ -201,32 +299,28 @@ async def main(last_seq):
                     except Exception as e:
                         print(e)
             except Exception as e:
+                print(e)
                 pass
 
             return False
+        
+    def error_handler(event):
+        print(f"Error: {event}")
 
-    async def listen_to_websocket(event):
-        nonlocal called
-        nonlocal processed
-        nonlocal times
-        nonlocal useless
+    def listen_to_websocket(event):
         nonlocal execute_counter
         nonlocal last_event_seq
         nonlocal last_seq
 
-        if event.header.op != 1:
-            #print(event)
-            return
+        metadata['called'] += 1
 
-        start = time.perf_counter()
+        if event.header.op != 1:
+            return
 
         seq = event.body.get("seq")
         if last_event_seq and seq != last_event_seq + 1:
             print(f'seq {seq} mismatches last_seq {last_event_seq}')
         last_event_seq = seq
-
-        called += 1
-        # print(event)
 
         repo = event.body.get("repo")
         ops = event.body.get("ops", [])
@@ -254,50 +348,21 @@ async def main(last_seq):
                     execute_counter += 1
 
             else:
-                useless += 1
                 continue
-                print(type)
-            event_time = event.body.get("time")
-            if event_time != None:
-                event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
-                taken_time = datetime.now(timezone.utc) - event_time
-            else:
-                print('no time')
 
-            processed += 1
-        if execute_counter % 500 == 1:
+        if execute_counter % 1000 == 0:
+            check_likes(database, cursor)
             commit_inserts(database, seq)
+            print('commit')
         last_seq = seq
-        end = time.perf_counter()
-        elapsed = end - start
-        times.append(elapsed)
-        # print(f'time: {elapsed}')
-
-    async def Match():
-        nonlocal isMatch
-        while isMatch < 5000:
-            await asyncio.sleep(2)
-            # isMatch += 1
-        return
 
     client.on_repo_commit = listen_to_websocket
 
-    task = asyncio.create_task(client.start(listen_to_websocket))
+    client.start(listen_to_websocket, error_handler)
 
-    asyncio.create_task(monitor_loop())
-    await asyncio.sleep(TRACKING_TIME_SEC)
     print("Stopping")
-    # await Match()
-    #commit_inserts(database, 2)
 
-    await client.stop()
-    
-    if len(times) > 0:
-        print(
-            f"first: {times[0]}, last: {times[len(times)-1]}, average: {numpy.average(times)}"
-        )
-        print(f"called: {called}, processed: {processed}, useless: {useless}")
-        #print(times[::500])
+    client.stop()
 
 
 parser = argparse.ArgumentParser(
@@ -312,12 +377,11 @@ last_seq = args.last_seq
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main(last_seq))
+        main(None)
     except (Exception, KeyboardInterrupt) as e:
         print(f"Error {e}")
+    finally:
         database.commit()
         database.close()
-        
-
-
-# asyncio.get_event_loop().run_until_complete(listen_to_websocket())
+        with open(f"./data/{database_name}_metadata.json", "w") as f:
+            json.dump(metadata, f)

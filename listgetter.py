@@ -1,4 +1,7 @@
+import re
+
 from atproto import Client
+import json
 
 client = Client(base_url="https://public.api.bsky.app")
 
@@ -17,17 +20,13 @@ while True:
 
     if response.items:
         for item in response.items:
-            print(item.subject.handle)
-            members.append(item.uri)
+            #print(item.subject.handle)
+            members.append(item.subject.did)
+            print(item.subject.did)
 
     cursor = response.cursor
-    print(f'cursor: {response.cursor}')
     if cursor == None:
         break
-
-print(response.list.list_item_count)
-
-print(len(members))
-
-
     
+with open('news_dids.json', 'w') as f:
+    json.dump(members, f)
