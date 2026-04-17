@@ -13,6 +13,7 @@ import time
 import random
 import langid
 import json
+import re
 
 import requests
 
@@ -33,7 +34,7 @@ metadata = {
 
 POST_MAX_TRACKING_TIME_SEC = 24 * 60 * 60
 MAX_ACTUAL_TIME_DIFFERENCE_SEC = 120
-TRACKING_TIME_SEC = 60 * 60 * 24 * 15
+TRACKING_TIME_SEC = 60 * 60 * 24 * 15   + 60 * 60
 SAMPLE_RATE = 1
 database_name = datetime.now().strftime('%m-%d-%Y_%H-%M')
 
@@ -59,15 +60,10 @@ def create_tables(cursor: sqlite3.Cursor):
                 post_cid TEXT NOT NULL UNIQUE,
                 post_uri TEXT NOT NULL UNIQUE, 
                 post_time TEXT NOT NULL, 
-                post_text TEXT, 
+                post_text TEXT,
                 delete_time TEXT,
-                likes_count INTEGER,
-                likes_checked BOOLEAN DEFAULT FALSE,
-                check_at TEXT,
                 is_news BOOLEAN,
                 PRIMARY KEY(post_cid))""")
-    cursor.execute(
-        """CREATE INDEX likes_check_index ON posts(likes_checked, check_at)""")
     
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS reposts(
@@ -90,22 +86,20 @@ def delete_tables(cursor):
 
 def insert_post(cursor, post_cid, post_uri, post_time, post_text, is_news):
 
-    check_likes_at = post_time + timedelta(seconds = 60)#timedelta(seconds=POST_MAX_TRACKING_TIME_SEC)
-
     try:
         cursor.execute(
-            "INSERT INTO posts (post_cid, post_uri, post_time, post_text, is_news, check_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (post_cid, post_uri, post_time, post_text, is_news, check_likes_at),
+            "INSERT INTO posts (post_cid, post_uri, post_time, post_text, is_news) VALUES (?, ?, ?, ?, ?)",
+            (post_cid, post_uri, post_time, post_text, is_news),
         )
     except sqlite3.IntegrityError:
-        print(f"Post with cid {post_cid} already exists in the database. : \n {post_text}")
+        print(f"post with cid {post_cid} already exists")
         pass
 
-def delete_post(cursor, post_cid, delete_time):
+def delete_post(cursor, post_uri, delete_time):
 
     cursor.execute(
-        "UPDATE posts SET delete_time = ? WHERE post_cid = ?", 
-        (delete_time, post_cid)
+        "UPDATE posts SET delete_time = ? WHERE post_uri = ?", 
+        (delete_time, post_uri)
     )
 
 def insert_repost(
@@ -138,25 +132,6 @@ def commit_inserts(database, last_seq):
     with open("last_seq.txt", "w") as output_file:
         output_file.write(str(last_seq))
 
-def check_likes(database, cursor):
-    cursor.execute("SELECT post_uri FROM posts WHERE likes_checked = FALSE AND check_at <= ?", (datetime.now(timezone.utc),))
-    while True:
-        uris = cursor.fetchmany(25)
-        print(len(uris))
-        if not uris:
-            break
-        url = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
-        response = requests.get(url, params={"uris": uris})
-        if response.status_code == 200:
-            data = response.json()
-            posts = data.get("posts", [])
-            for post in posts:
-                post_uri = post["uri"]
-                likes_count = post["likeCount"]
-                print(post_uri, likes_count)
-                cursor.execute("UPDATE posts SET likes_count = ?, likes_checked = TRUE WHERE post_uri = ?", (likes_count, post_uri))
-
-
 
 def main(last_seq):
     client = FirehoseSubscribeReposClient(params={"cursor": last_seq})
@@ -167,7 +142,7 @@ def main(last_seq):
     cursor = database.cursor()
     news_dids = json.load(open('news_dids.json', 'r'))
 
-    delete_tables(cursor)
+    #delete_tables(cursor)
     create_tables(cursor)
 
     def generalize_time(time_str):
@@ -228,10 +203,13 @@ def main(last_seq):
                 metadata['valid_time_count'] += 1
                 
                 post_text = post_block.get("text")
+                
 
                 if post_text == None:
                     print(f"None: {post_block}")
                     return False
+                
+                post_text = re.sub(r'@[\w.]+', '@user', post_text)
                 
                 if langs == None or "en" in langs:
                     metadata['english_tag'] += 1
@@ -293,11 +271,12 @@ def main(last_seq):
                         )
                         return True
 
-                    except PostNotTrackedException:
+                    except (PostNotTrackedException, TooLateException):
                         pass
 
                     except Exception as e:
                         print(e)
+
             except Exception as e:
                 print(e)
                 pass
@@ -340,20 +319,21 @@ def main(last_seq):
 
                 if handle_repost(op, carFile, repo):
                     execute_counter += 1
+                    if execute_counter % 1000 == 0:
+                        commit_inserts(database, seq)
 
             elif opType.startswith("app.bsky.feed.post/"):
 
                 
                 if handle_post(op, carFile, repo):
                     execute_counter += 1
+                    if execute_counter % 1000 == 0:
+                        commit_inserts(database, seq)
 
             else:
                 continue
 
-        if execute_counter % 1000 == 0:
-            check_likes(database, cursor)
-            commit_inserts(database, seq)
-            print('commit')
+        
         last_seq = seq
 
     client.on_repo_commit = listen_to_websocket
